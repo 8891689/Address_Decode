@@ -1,41 +1,103 @@
-/*Author: 8891689
- *https://github.com/8891689
- * Assist in creation ：ChatGPT
- */
+/* Apache License, Version 2.0
+   Copyright [2025] [8891689]
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+   Author: 8891689 (https://github.com/8891689)
+*/
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <stdint.h>
 
 #include "bech32.h"
+
 /* Bech32 字符集 */
-static const char *CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+static const char CHARSET[] = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+
+/* 预计算的字符映射表 */
+static uint8_t CHAR_MAP[256] = {0};
+
+/* 初始化字符映射表 */
+static void init_char_map() {
+    static int initialized = 0;
+    if (initialized) return;
+    
+    for (int i = 0; i < 32; i++) {
+        CHAR_MAP[(unsigned char)CHARSET[i]] = i;
+    }
+    initialized = 1;
+}
 
 /* --- 内部函数 --- */
 
-/* 计算 Bech32 校验和（polymod） */
-static uint32_t bech32_polymod(const int *values, size_t values_len) {
+/* 多项式计算 - 使用循环展开和预计算 */
+static inline uint32_t bech32_polymod(const uint8_t *values, size_t values_len) {
     uint32_t chk = 1;
-    for (size_t i = 0; i < values_len; i++) {
-        int top = chk >> 25;
-        chk = ((chk & 0x1ffffff) << 5) ^ (uint32_t)values[i];
+    size_t i = 0;
+    
+    // 预计算的生成多项式
+    static const uint32_t GEN[5] = {
+        0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3
+    };
+    
+    // 处理4字节块
+    for (; i + 4 <= values_len; i += 4) {
+        uint8_t v0 = values[i];
+        uint8_t v1 = values[i+1];
+        uint8_t v2 = values[i+2];
+        uint8_t v3 = values[i+3];
+        
+        // 展开内部循环
+        uint8_t top = chk >> 25;
+        chk = ((chk & 0x1ffffff) << 5) | v0;
         for (int j = 0; j < 5; j++) {
-            if ((top >> j) & 1) {
-                switch(j) {
-                    case 0: chk ^= 0x3b6a57b2; break;
-                    case 1: chk ^= 0x26508e6d; break;
-                    case 2: chk ^= 0x1ea119fa; break;
-                    case 3: chk ^= 0x3d4233dd; break;
-                    case 4: chk ^= 0x2a1462b3; break;
-                }
-            }
+            if (top & (1 << j)) chk ^= GEN[j];
+        }
+        
+        top = chk >> 25;
+        chk = ((chk & 0x1ffffff) << 5) | v1;
+        for (int j = 0; j < 5; j++) {
+            if (top & (1 << j)) chk ^= GEN[j];
+        }
+        
+        top = chk >> 25;
+        chk = ((chk & 0x1ffffff) << 5) | v2;
+        for (int j = 0; j < 5; j++) {
+            if (top & (1 << j)) chk ^= GEN[j];
+        }
+        
+        top = chk >> 25;
+        chk = ((chk & 0x1ffffff) << 5) | v3;
+        for (int j = 0; j < 5; j++) {
+            if (top & (1 << j)) chk ^= GEN[j];
         }
     }
+    
+    // 处理剩余字节
+    for (; i < values_len; i++) {
+        uint8_t top = chk >> 25;
+        chk = ((chk & 0x1ffffff) << 5) | values[i];
+        for (int j = 0; j < 5; j++) {
+            if (top & (1 << j)) chk ^= GEN[j];
+        }
+    }
+    
     return chk;
 }
 
-/* 将 HRP 扩展为校验和计算用的数组 */
-static int bech32_hrp_expand(const char *hrp, int *output) {
+/* 将 HRP 扩展为校验和计算用的数组  */
+static inline void bech32_hrp_expand(const char *hrp, uint8_t *output) {
     size_t hrp_len = strlen(hrp);
     for (size_t i = 0; i < hrp_len; i++) {
         output[i] = hrp[i] >> 5;
@@ -44,199 +106,259 @@ static int bech32_hrp_expand(const char *hrp, int *output) {
     for (size_t i = 0; i < hrp_len; i++) {
         output[hrp_len + 1 + i] = hrp[i] & 31;
     }
-    return (int)(2 * hrp_len + 1);
 }
 
-/* 校验 checksum 是否正确 */
-static int bech32_verify_checksum(const char *hrp, const int *data, size_t data_len) {
-    int hrp_expanded[256];
-    int hrp_exp_len = bech32_hrp_expand(hrp, hrp_expanded);
-    int values[256];
-    size_t total_len = hrp_exp_len + data_len;
-    if (total_len > 256) return 0;
-    memcpy(values, hrp_expanded, hrp_exp_len * sizeof(int));
-    memcpy(values + hrp_exp_len, data, data_len * sizeof(int));
-    return (bech32_polymod(values, total_len) == 1);
-}
-
-/* 根据 HRP 与数据生成 6 个校验值 */
-static void bech32_create_checksum(const char *hrp, const int *data, size_t data_len, int *checksum) {
-    int hrp_expanded[256];
-    int hrp_exp_len = bech32_hrp_expand(hrp, hrp_expanded);
-    int values[256];
-    size_t total_len = hrp_exp_len + data_len + 6;
-    memcpy(values, hrp_expanded, hrp_exp_len * sizeof(int));
-    memcpy(values + hrp_exp_len, data, data_len * sizeof(int));
-    for (int i = 0; i < 6; i++) {
-        values[hrp_exp_len + data_len + i] = 0;
-    }
-    uint32_t polymod = bech32_polymod(values, total_len) ^ 1;
-    for (int i = 0; i < 6; i++) {
-        checksum[i] = (polymod >> (5 * (5 - i))) & 31;
-    }
-}
-
-/* 根据 HRP 与数据生成 Bech32 字符串 */
-static char *bech32_encode(const char *hrp, const int *data, size_t data_len) {
-    int checksum[6];
-    bech32_create_checksum(hrp, data, data_len, checksum);
+/* 超快速校验和验证 - 优化BECH32M */
+static inline int bech32_fast_verify_checksum(const char *hrp, const uint8_t *data, 
+                                            size_t data_len, int *out_version) {
     size_t hrp_len = strlen(hrp);
-    size_t output_len = hrp_len + 1 + data_len + 6;  /* hrp + '1' + 数据 + 校验值 */
+    
+    // 内联HRP扩展计算，避免函数调用
+    uint8_t hrp_expanded[128];
+    for (size_t i = 0; i < hrp_len; i++) {
+        hrp_expanded[i] = hrp[i] >> 5;
+    }
+    hrp_expanded[hrp_len] = 0;
+    for (size_t i = 0; i < hrp_len; i++) {
+        hrp_expanded[hrp_len + 1 + i] = hrp[i] & 31;
+    }
+    
+    size_t total_len = 2 * hrp_len + 1 + data_len;
+    if (total_len > 256) return 0;
+    
+    // 使用栈上数组，避免动态分配
+    uint8_t values[256];
+    memcpy(values, hrp_expanded, 2 * hrp_len + 1);
+    memcpy(values + 2 * hrp_len + 1, data, data_len);
+    
+    uint32_t chk = bech32_polymod(values, total_len);
+    
+    // 同时检查两个版本，避免重复计算
+    if (chk == 1) {
+        *out_version = 0;
+        return 1;
+    } else if (chk == 0x2bc830a3) {
+        *out_version = 1;
+        return 1;
+    }
+    
+    return 0;
+}
+
+/* 根据 HRP 与数据生成 6 个校验值 - 优化 */
+static inline void bech32_create_checksum(const char *hrp, const uint8_t *data, 
+                                        size_t data_len, uint8_t *checksum, int version) {
+    size_t hrp_len = strlen(hrp);
+    uint8_t hrp_expanded[128];
+    bech32_hrp_expand(hrp, hrp_expanded);
+    
+    size_t total_len = 2 * hrp_len + 1 + data_len + 6;
+    uint8_t values[256];
+    memcpy(values, hrp_expanded, 2 * hrp_len + 1);
+    memcpy(values + 2 * hrp_len + 1, data, data_len);
+    memset(values + 2 * hrp_len + 1 + data_len, 0, 6);
+    
+    uint32_t polymod = bech32_polymod(values, total_len);
+    uint32_t constant = (version == 0) ? 1 : 0x2bc830a3;
+    polymod ^= constant;
+    
+    // 展开循环
+    checksum[0] = (polymod >> 25) & 31;
+    checksum[1] = (polymod >> 20) & 31;
+    checksum[2] = (polymod >> 15) & 31;
+    checksum[3] = (polymod >> 10) & 31;
+    checksum[4] = (polymod >> 5) & 31;
+    checksum[5] = polymod & 31;
+}
+
+/* 根据 HRP 与数据生成 Bech32 字符串 - 优化 */
+static char *bech32_encode(const char *hrp, const uint8_t *data, size_t data_len, int version) {
+    uint8_t checksum[6];
+    bech32_create_checksum(hrp, data, data_len, checksum, version);
+    
+    size_t hrp_len = strlen(hrp);
+    size_t output_len = hrp_len + 1 + data_len + 6;
     char *ret = malloc(output_len + 1);
     if (!ret) return NULL;
-    strcpy(ret, hrp);
+    
+    // 复制HRP
+    memcpy(ret, hrp, hrp_len);
     ret[hrp_len] = '1';
+    
+    // 复制数据部分
     for (size_t i = 0; i < data_len; i++) {
-        int d = data[i];
-        if (d < 0 || d >= 32) { free(ret); return NULL; }
-        ret[hrp_len + 1 + i] = CHARSET[d];
+        ret[hrp_len + 1 + i] = CHARSET[data[i]];
     }
+    
+    // 复制校验和
     for (size_t i = 0; i < 6; i++) {
         ret[hrp_len + 1 + data_len + i] = CHARSET[checksum[i]];
     }
+    
     ret[output_len] = '\0';
     return ret;
 }
 
-/* 解码 Bech32 字符串。
- * out_hrp: 保存 HRP 的缓冲区（至少 84 字节）。
- * out_data: 保存解码后数据的数组（调用者保证空间足够）。
- * out_data_len: 输出数据的个数（不含校验值）。
- * 返回 1 表示成功，0 表示失败。
- */
-static int bech32_decode_impl(const char *bech, char *out_hrp, int *out_data, size_t *out_data_len) {
+/* 解码 Bech32 字符串 - 优化BECH32M性能 */
+static int bech32_decode_impl(const char *bech, char *out_hrp, uint8_t *out_data, 
+                             size_t *out_data_len, int *out_version) {
     size_t len = strlen(bech);
     if (len < 8 || len > 90) return 0;
-    int has_lower = 0, has_upper = 0;
-    for (size_t i = 0; i < len; i++) {
-        unsigned char c = bech[i];
-        if (c < 33 || c > 126) return 0;
-        if (c >= 'a' && c <= 'z') has_lower = 1;
-        if (c >= 'A' && c <= 'Z') has_upper = 1;
-    }
-    if (has_lower && has_upper) return 0;  /* 不允许混合大小写 */
-    char *bech_copy = malloc(len + 1);
-    if (!bech_copy) return 0;
-    for (size_t i = 0; i < len; i++) {
-        bech_copy[i] = tolower(bech[i]);
-    }
-    bech_copy[len] = '\0';
+    
+    // 初始化字符映射表
+    init_char_map();
+    
+    // 查找分隔符位置
     int pos = -1;
     for (size_t i = 0; i < len; i++) {
-        if (bech_copy[i] == '1') pos = i;
+        if (bech[i] == '1') {
+            pos = i;
+            break;
+        }
     }
-    if (pos < 1 || pos + 7 > (int)len) { free(bech_copy); return 0; }
+    if (pos < 1 || pos + 7 > (int)len) return 0;
+    
+    // 提取HRP
     size_t hrp_len = pos;
-    memcpy(out_hrp, bech_copy, hrp_len);
+    memcpy(out_hrp, bech, hrp_len);
     out_hrp[hrp_len] = '\0';
+    
+    // 转换数据部分
     size_t data_part_len = len - pos - 1;
-    if (data_part_len < 6) { free(bech_copy); return 0; }
+    if (data_part_len < 6) return 0;
+    
+    // 快速转换数据部分
     for (size_t i = 0; i < data_part_len; i++) {
-        char *p = strchr(CHARSET, bech_copy[pos + 1 + i]);
-        if (!p) { free(bech_copy); return 0; }
-        out_data[i] = p - CHARSET;
+        uint8_t c = (uint8_t)bech[pos + 1 + i];
+        out_data[i] = CHAR_MAP[c];
+        if (out_data[i] == 0 && c != 'q') return 0; // 无效字符
     }
-    free(bech_copy);
-    if (!bech32_verify_checksum(out_hrp, out_data, data_part_len)) {
+    
+    // 使用快速校验和验证（同时检查两个版本）
+    if (!bech32_fast_verify_checksum(out_hrp, out_data, data_part_len, out_version)) {
         return 0;
     }
-    if (data_part_len < 6) return 0;
+    
     *out_data_len = data_part_len - 6;
     return 1;
 }
 
-/* 通用的位转换函数：将 in 数组（每个值占 frombits 位）转换为 tobits 位输出。
- * pad 为非零表示在不足时补零。
- * out 数组由调用者提供，outlen 输出转换后数组的长度。
- * 成功返回 1，失败返回 0。
- */
-static int convertbits(const int *in, size_t inlen, int frombits, int tobits, int pad, int *out, size_t *outlen) {
+/* 位转换函数 - 优化 */
+static inline int convertbits(const uint8_t *in, size_t inlen, int frombits, int tobits, 
+                            int pad, uint8_t *out, size_t *outlen) {
     uint32_t acc = 0;
     int bits = 0;
     size_t out_idx = 0;
     uint32_t maxv = (1 << tobits) - 1;
-    uint32_t max_acc = (1 << (frombits + tobits - 1)) - 1;
-    for (size_t i = 0; i < inlen; i++) {
-        int value = in[i];
-        if (value < 0 || (value >> frombits)) return 0;
-        acc = ((acc << frombits) | value) & max_acc;
-        bits += frombits;
-        while (bits >= tobits) {
-            bits -= tobits;
-            out[out_idx++] = (acc >> bits) & maxv;
+    
+    // 处理8位到5位转换的常见情况
+    if (frombits == 8 && tobits == 5) {
+        for (size_t i = 0; i < inlen; i++) {
+            acc = (acc << 8) | in[i];
+            bits += 8;
+            while (bits >= 5) {
+                bits -= 5;
+                out[out_idx++] = (acc >> bits) & 31;
+            }
         }
-    }
-    if (pad) {
-        if (bits > 0) {
-            out[out_idx++] = (acc << (tobits - bits)) & maxv;
+    } else if (frombits == 5 && tobits == 8) {
+        for (size_t i = 0; i < inlen; i++) {
+            acc = (acc << 5) | in[i];
+            bits += 5;
+            while (bits >= 8) {
+                bits -= 8;
+                out[out_idx++] = (acc >> bits) & 255;
+            }
         }
     } else {
-        if (bits >= frombits) return 0;
-        if (((acc << (tobits - bits)) & maxv) != 0) return 0;
+        // 通用情况
+        for (size_t i = 0; i < inlen; i++) {
+            acc = (acc << frombits) | in[i];
+            bits += frombits;
+            while (bits >= tobits) {
+                bits -= tobits;
+                out[out_idx++] = (acc >> bits) & maxv;
+            }
+        }
     }
+    
+    if (pad && bits > 0) {
+        out[out_idx++] = (acc << (tobits - bits)) & maxv;
+    }
+    
     *outlen = out_idx;
     return 1;
 }
 
-/* 内部实现：解码 segwit 地址
- * addr: 输入的 Bech32 地址
- * hrp: 预期的 HRP
- * witver: 输出 witness 版本
- * witprog: 输出 witness 程序缓冲区（调用者保证空间足够）
- * witprog_len: 输入时为缓冲区大小，输出时为实际长度
- * 成功返回 1，失败返回 0。
- */
-static int segwit_addr_decode_internal(const char *addr, const char *hrp, int *witver, uint8_t *witprog, size_t *witprog_len) {
+/* 内部实现：解码 segwit 地址 - 优化BECH32M */
+static int segwit_addr_decode_internal(const char *addr, const char *hrp, int *witver, 
+                                      uint8_t *witprog, size_t *witprog_len) {
     char hrp_decoded[84];
-    int data[90];
+    uint8_t data[90];
     size_t data_len;
-    if (!bech32_decode_impl(addr, hrp_decoded, data, &data_len)) return 0;
-    if (strcmp(hrp_decoded, hrp) != 0) return 0;
-    if (data_len < 1) return 0;
-    *witver = data[0];
-    int conv[200];
-    size_t conv_len;
-    if (!convertbits(data + 1, data_len - 1, 5, 8, 0, conv, &conv_len)) return 0;
-    if (conv_len < 2 || conv_len > 40) return 0;
-    if (*witver > 16) return 0;
-    if (*witver == 0 && conv_len != 20 && conv_len != 32) return 0;
-    if (*witprog_len < conv_len) return 0;
-    for (size_t i = 0; i < conv_len; i++) {
-        witprog[i] = (uint8_t)conv[i];
+    int version;
+    
+    if (!bech32_decode_impl(addr, hrp_decoded, data, &data_len, &version)) {
+        return 0;
     }
+    
+    if (strcmp(hrp_decoded, hrp) != 0) {
+        return 0;
+    }
+    
+    if (data_len < 1) {
+        return 0;
+    }
+    
+    *witver = data[0];
+    
+    // 检查版本是否一致
+    if (*witver != version) {
+        return 0;
+    }
+    
+    uint8_t conv[40];
+    size_t conv_len;
+    if (!convertbits(data + 1, data_len - 1, 5, 8, 0, conv, &conv_len)) {
+        return 0;
+    }
+    
+    if (conv_len < 2 || conv_len > 40) {
+        return 0;
+    }
+    
+    if (*witver > 16) {
+        return 0;
+    }
+    
+    if (*witver == 0 && conv_len != 20 && conv_len != 32) {
+        return 0;
+    }
+    
+    if (*witprog_len < conv_len) {
+        return 0;
+    }
+    
+    memcpy(witprog, conv, conv_len);
     *witprog_len = conv_len;
     return 1;
 }
 
-/* 内部实现：编码 segwit 地址
- * hrp: 人类可读部分
- * witver: witness 版本
- * witprog: witness 程序数据
- * witprog_len: witness 程序长度
- * 成功时返回 malloc 分配的地址字符串，失败返回 NULL。
- */
-static char *segwit_addr_encode_internal(const char *hrp, int witver, const uint8_t *witprog, size_t witprog_len) {
-    int in[200];
-    for (size_t i = 0; i < witprog_len; i++) {
-        in[i] = witprog[i];
-    }
-    int five_bit[200];
+/* 内部实现：编码 segwit 地址 - 优化 */
+static char *segwit_addr_encode_internal(const char *hrp, int witver, const uint8_t *witprog, 
+                                       size_t witprog_len) {
+    uint8_t five_bit[200];
     size_t five_bit_len;
-    if (!convertbits(in, witprog_len, 8, 5, 1, five_bit, &five_bit_len)) return NULL;
-    int data[201];
-    data[0] = witver;
-    memcpy(data + 1, five_bit, five_bit_len * sizeof(int));
-    size_t data_len = five_bit_len + 1;
-    char *ret = bech32_encode(hrp, data, data_len);
-    if (ret == NULL) return NULL;
-    /* 可选：验证编码结果 */
-    int ver;
-    uint8_t prog[40];
-    size_t prog_len = sizeof(prog);
-    if (!segwit_addr_decode_internal(ret, hrp, &ver, prog, &prog_len)) {
-        free(ret);
+    if (!convertbits(witprog, witprog_len, 8, 5, 1, five_bit, &five_bit_len)) {
         return NULL;
     }
+    
+    uint8_t data[200];
+    data[0] = witver;
+    memcpy(data + 1, five_bit, five_bit_len);
+    size_t data_len = five_bit_len + 1;
+    
+    char *ret = bech32_encode(hrp, data, data_len, witver);
     return ret;
 }
 
@@ -255,4 +377,3 @@ int segwit_addr_encode(char *output, const char *hrp, int witver, const uint8_t 
 int segwit_addr_decode(const char *addr, const char *hrp, int *witver, uint8_t *witprog, size_t *witprog_len) {
     return segwit_addr_decode_internal(addr, hrp, witver, witprog, witprog_len);
 }
-

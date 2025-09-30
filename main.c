@@ -1,7 +1,29 @@
-/*  https://github.com/8891689 
- *  Author: 8891689
+/*
+MIT License
+
+Copyright (c) 2025 8891689
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. *https://github.com/8891689 
  */
-// gcc -O3 -lpthread -Wall -Wextra -march=native -static base58.c bech32.c cashaddr.c main.c sha256.c -o decode
+
+// Description: A multi-threaded tool to decode various cryptocurrency addresses from a large file.
+ 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,21 +32,143 @@
 #include <pthread.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <time.h>
 
+
+// ======================= CROSS-PLATFORM COMPATIBILITY: TIME FUNCTIONS =======================
 #ifdef _WIN32
 #include <windows.h>
-#else
+#define FSEEK _fseeki64
+#define FTELL _ftelli64
+#define OFF_T __int64
+
+// Windows-specific high-precision timer implementation
+typedef struct {
+    LARGE_INTEGER start;
+    LARGE_INTEGER frequency;
+} TimerData;
+
+static void start_timer(TimerData *timer) {
+    QueryPerformanceFrequency(&timer->frequency);
+    QueryPerformanceCounter(&timer->start);
+}
+
+static double get_elapsed_seconds(TimerData *timer) {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return (double)(now.QuadPart - timer->start.QuadPart) / timer->frequency.QuadPart;
+}
+
+// Provide getline for Windows as it's a GNU extension
+typedef long long ssize_t;
+ssize_t getline(char **lineptr, size_t *n, FILE *stream) {
+    char *bufptr = NULL;
+    char *p = bufptr;
+    size_t size;
+    int c;
+    if (lineptr == NULL || stream == NULL || n == NULL) { return -1; }
+    bufptr = *lineptr;
+    size = *n;
+    c = fgetc(stream);
+    if (c == EOF) { return -1; }
+    if (bufptr == NULL) {
+        bufptr = malloc(128);
+        if (bufptr == NULL) { return -1; }
+        size = 128;
+    }
+    p = bufptr;
+    while(c != EOF) {
+        if ((size_t)(p - bufptr) >= (size - 1)) {
+            size_t offset = p - bufptr;
+            size += 128;
+            char *new_buf = realloc(bufptr, size);
+            if (new_buf == NULL) { return -1; }
+            bufptr = new_buf;
+            p = bufptr + offset;
+        }
+        *p++ = c;
+        if (c == '\n') { break; }
+        c = fgetc(stream);
+    }
+    *p++ = '\0';
+    *lineptr = bufptr;
+    *n = size;
+    return p - bufptr - 1;
+}
+
+#define usleep(x) Sleep((x)/1000)
+
+#else // For non-Windows (Linux, macOS, etc.)
 #include <unistd.h>
+#define FSEEK fseeko
+#define FTELL ftello
+#define OFF_T off_t
+
+// POSIX-standard timer implementation
+typedef struct {
+    struct timespec start;
+} TimerData;
+
+static void start_timer(TimerData *timer) {
+    clock_gettime(CLOCK_MONOTONIC, &timer->start);
+}
+
+static double get_elapsed_seconds(TimerData *timer) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (double)(now.tv_sec - timer->start.tv_sec) + (double)(now.tv_nsec - timer->start.tv_nsec) / 1e9;
+}
+
 #endif
+// =================================== END OF COMPATIBILITY FIXES ===================================
+
 
 #include "sha256.h"
 #include "base58.h"
 #include "bech32.h"
 #include "cashaddr.h"
 
-/* -------------------------------------------------------------------------
- * 1. 輔助函數：將字節數組轉換為十六進制字符串 
- * -------------------------------------------------------------------------*/
+/* =========================================================================
+ * 1. GLOBAL VARIABLES & SHARED RESOURCES
+ * ========================================================================= */
+
+#define BUFFER_SIZE 10000
+typedef struct {
+    char *line;
+    size_t length;
+} LineData;
+
+LineData line_buffer[BUFFER_SIZE];
+size_t count_in_buffer = 0;
+size_t read_idx = 0;
+size_t write_idx = 0;
+bool producer_finished = false;
+
+pthread_mutex_t buffer_mutex;
+pthread_cond_t buffer_not_full;
+pthread_cond_t buffer_not_empty;
+
+pthread_mutex_t output_mutex;
+FILE *fout_failure = NULL;
+volatile size_t failure_count = 0;
+
+pthread_mutex_t results_mutex;
+char **success_results = NULL;
+volatile size_t success_capacity = 0;
+volatile size_t success_count_atomic = 0;
+
+volatile OFF_T total_bytes = 0;
+volatile OFF_T processed_bytes = 0;
+volatile bool display_thread_done = false;
+
+typedef struct {
+    TimerData *timer;
+} ProgressData;
+
+/* =========================================================================
+ * 2. HELPER FUNCTIONS
+ * ========================================================================= */
+
 static void bytes_to_hex(const unsigned char *bytes, size_t len, char *hex_str) {
     for (size_t i = 0; i < len; i++) {
         sprintf(&hex_str[i * 2], "%02x", bytes[i]);
@@ -32,69 +176,50 @@ static void bytes_to_hex(const unsigned char *bytes, size_t len, char *hex_str) 
     hex_str[len * 2] = '\0';
 }
 
-/* -------------------------------------------------------------------------
- * 2. 輔助函數：將十六進制字符串轉換為字節數組 
- * -------------------------------------------------------------------------*/
 static int hex_to_bytes(const char *hex_str, unsigned char *bytes_out, size_t max_len) {
     size_t len = strlen(hex_str);
-    if (len % 2 != 0) {
-        return 0;
-    }
+    if (len % 2 != 0) return 0;
     size_t bytes_len = len / 2;
-    if (bytes_len > max_len) {
-        return 0;
-    }
+    if (bytes_len > max_len) return 0;
     for (size_t i = 0; i < bytes_len; i++) {
         unsigned int val;
-        if (sscanf(hex_str + (i * 2), "%2x", &val) != 1) {
-            return 0;
-        }
+        if (sscanf(hex_str + (i * 2), "%2x", &val) != 1) return 0;
         bytes_out[i] = (unsigned char)val;
     }
     return (int)bytes_len;
 }
 
-/* -------------------------------------------------------------------------
- * 3. 去除行首尾空白 
- * -------------------------------------------------------------------------*/
-static void trim_whitespace(char *s)
-{
-    size_t l = strlen(s);
-    while(l > 0 && isspace((unsigned char)s[l-1])){
-        s[--l] = 0;
-    }
-    int start = 0;
-    while(s[start] && isspace((unsigned char)s[start])){
-        start++;
-    }
-    if(start > 0){
-        memmove(s, s + start, l + 1 - start);
-    }
+int compare_strings(const void *a, const void *b) {
+    return strcmp(*(const char **)a, *(const char **)b);
 }
 
-/* -------------------------------------------------------------------------
- * 4. decode_address_general 
- * -------------------------------------------------------------------------*/
-static int decode_address_general(const char *addr_str, unsigned char *out_bytes, size_t *out_len) {
-    unsigned char temp_decoded_buf[64];
+/* =========================================================================
+ * 3. CORE DECODING LOGIC
+ * ========================================================================= */
+
+static int decode_address_general(const char *addr_str, unsigned char *out_bytes, size_t out_capacity, size_t *out_len) {
+    unsigned char temp_decoded_buf[256];
     size_t current_len = 0;
     int witver;
 
-    uint8_t *b58_payload = base58_decode_check(addr_str, &current_len);
-    if (b58_payload) {
-        if (current_len >= 20) {
-            memcpy(out_bytes, b58_payload + 1, 20);
-            *out_len = 20;
-            free(b58_payload);
-            return 1;
-        }
-        free(b58_payload);
+    current_len = base58_decode_check(addr_str, temp_decoded_buf, sizeof(temp_decoded_buf));
+    if (current_len == 21) { // P2PKH
+        if (out_capacity < 20) return 0;
+        memcpy(out_bytes, temp_decoded_buf + 1, 20);
+        *out_len = 20;
+        return 1;
+    } else if (current_len == 22) { // P2SH
+        if (out_capacity < 20) return 0;
+        memcpy(out_bytes, temp_decoded_buf + 2, 20);
+        *out_len = 20;
+        return 1;
     }
 
     const char *hrps[] = {"bc", "tb", "ltc", "tltc", "btg", NULL};
     for (int i = 0; hrps[i] != NULL; ++i) {
         size_t segwit_prog_len_val = sizeof(temp_decoded_buf);
         if (segwit_addr_decode(addr_str, hrps[i], &witver, temp_decoded_buf, &segwit_prog_len_val)) {
+            if (out_capacity < segwit_prog_len_val) return 0;
             memcpy(out_bytes, temp_decoded_buf, segwit_prog_len_val);
             *out_len = segwit_prog_len_val;
             return 1;
@@ -103,7 +228,7 @@ static int decode_address_general(const char *addr_str, unsigned char *out_bytes
 
     CashAddrResult cash_result;
     if (decode_cashaddr(addr_str, &cash_result) == 0) {
-        current_len = hex_to_bytes(cash_result.hash160, out_bytes, 20);
+        current_len = hex_to_bytes(cash_result.hash160, out_bytes, out_capacity);
         if (current_len == 20) {
             *out_len = 20;
             return 1;
@@ -111,9 +236,9 @@ static int decode_address_general(const char *addr_str, unsigned char *out_bytes
     }
 
     if (strncmp(addr_str, "0x", 2) == 0 || strncmp(addr_str, "0X", 2) == 0) {
-        current_len = hex_to_bytes(addr_str + 2, out_bytes, sizeof(temp_decoded_buf));
+        current_len = hex_to_bytes(addr_str + 2, out_bytes, out_capacity);
     } else {
-        current_len = hex_to_bytes(addr_str, out_bytes, sizeof(temp_decoded_buf));
+        current_len = hex_to_bytes(addr_str, out_bytes, out_capacity);
     }
 
     if (current_len > 0) {
@@ -124,120 +249,156 @@ static int decode_address_general(const char *addr_str, unsigned char *out_bytes
     return 0;
 }
 
-/* -------------------------------------------------------------------------
- * 5. 线程相關結構和變量
- * -------------------------------------------------------------------------*/
+/* =========================================================================
+ * 4. CONCURRENT WORKERS (THREADS)
+ * ========================================================================= */
 
-#define DECODE_FAILED            -1
-#define SUCCESS_NON_STANDARD_HASH 0
-#define SUCCESS_STANDARD_HASH     1
+void* display_progress(void *arg) {
+    ProgressData *p_data = (ProgressData*)arg;
+    TimerData *timer = p_data->timer;
+    const int BAR_WIDTH = 40;
 
-
-typedef struct {
-    char output_hex_str[65];     
-    int status;                  
-    size_t original_line_index;  
-} ProcessedResult;
-
-// ThreadData 結構用於傳遞給每個線程的數據 
-typedef struct {
-    char **lines;
-    size_t start;
-    size_t end;
-    ProcessedResult *results;
-} ThreadData;
-
-// 線程處理函數
-void* thread_process(void *arg)
-{
-    ThreadData *data = (ThreadData*)arg;
-    for(size_t i = data->start; i < data->end; i++){
-        char *full_line = data->lines[i];
-
-        data->results[i].original_line_index = i;
-        
-        char address_part_buffer[512];
-
-        char *tab_pos = strchr(full_line, '\t');
-        if (tab_pos) {
-            size_t addr_len = tab_pos - full_line;
-            if (addr_len >= sizeof(address_part_buffer)) {
-                data->results[i].status = DECODE_FAILED; 
-                continue;
-            }
-            strncpy(address_part_buffer, full_line, addr_len);
-            address_part_buffer[addr_len] = '\0';
-        } else {
-            strncpy(address_part_buffer, full_line, sizeof(address_part_buffer) - 1);
-            address_part_buffer[sizeof(address_part_buffer) - 1] = '\0';
-        }
-        trim_whitespace(address_part_buffer);
-
-        if (address_part_buffer[0] == '\0') {
-            data->results[i].status = DECODE_FAILED;
+    while (!display_thread_done) {
+        if (total_bytes <= 0) {
+            usleep(100000);
             continue;
         }
+        double percentage = (double)processed_bytes * 100.0 / total_bytes;
+        int pos = (int)((double)BAR_WIDTH * processed_bytes / total_bytes);
 
-        unsigned char extracted_bytes[64];
-        size_t extracted_len = 0;
+        double elapsed_sec = get_elapsed_seconds(timer);
+        double speed = elapsed_sec > 0.01 ? (double)processed_bytes / (1024.0 * 1024.0) / elapsed_sec : 0.0;
 
-        if (decode_address_general(address_part_buffer, extracted_bytes, &extracted_len)) {
-            if (extracted_len == 20) {
-                data->results[i].status = SUCCESS_STANDARD_HASH;
-                bytes_to_hex(extracted_bytes, 20, data->results[i].output_hex_str);
-            } else {
-                data->results[i].status = SUCCESS_NON_STANDARD_HASH;
-
-                const size_t max_bytes_for_buffer = (sizeof(data->results[i].output_hex_str) - 1) / 2;
-                
-                size_t len_to_convert = extracted_len;
-
-                if (len_to_convert > max_bytes_for_buffer) {
-                    len_to_convert = max_bytes_for_buffer;
-                }
-                
-                bytes_to_hex(extracted_bytes, len_to_convert, data->results[i].output_hex_str);
-
-            }
-        } else {
-            data->results[i].status = DECODE_FAILED;
+        fprintf(stderr, "\rDecoding: [");
+        for (int i = 0; i < BAR_WIDTH; ++i) {
+            if (i < pos) fprintf(stderr, "=");
+            else if (i == pos) fprintf(stderr, ">");
+            else fprintf(stderr, " ");
         }
+        fprintf(stderr, "] %6.2f%% | %.2f MB/s ", percentage > 100.0 ? 100.0 : percentage, speed);
+        fflush(stderr);
+        usleep(100000);
+    }
+
+    double total_elapsed_sec = get_elapsed_seconds(timer);
+    fprintf(stderr, "\rDecoding: [========================================] 100.00%% | Total Time: %.2fs\n", total_elapsed_sec);
+    fflush(stderr);
+    return NULL;
+}
+
+void* thread_process(void *arg) {
+    (void)arg;
+    while (1) {
+        pthread_mutex_lock(&buffer_mutex);
+        while (count_in_buffer == 0 && !producer_finished) {
+            pthread_cond_wait(&buffer_not_empty, &buffer_mutex);
+        }
+        if (count_in_buffer == 0 && producer_finished) {
+            pthread_mutex_unlock(&buffer_mutex);
+            break;
+        }
+
+        LineData data = line_buffer[read_idx];
+        read_idx = (read_idx + 1) % BUFFER_SIZE;
+        count_in_buffer--;
+        pthread_cond_signal(&buffer_not_full);
+        pthread_mutex_unlock(&buffer_mutex);
+
+        char address_part_buffer[1024];
+        address_part_buffer[0] = '\0';
+        bool truncated = false;
+        
+        char *p = data.line;
+        while (*p && isspace((unsigned char)*p)) p++;
+        
+        char *end = p;
+        while (*end && !isspace((unsigned char)*end)) end++;
+
+        size_t addr_len = end - p;
+        if (addr_len > 0) {
+            size_t copy_len = addr_len;
+            if (copy_len >= sizeof(address_part_buffer)) {
+                copy_len = sizeof(address_part_buffer) - 1;
+                truncated = true;
+            }
+            strncpy(address_part_buffer, p, copy_len);
+            address_part_buffer[copy_len] = '\0';
+        }
+
+        if (address_part_buffer[0] == '\0') {
+            pthread_mutex_lock(&output_mutex);
+            fprintf(fout_failure, "[EMPTY_ADDRESS] %s", data.line);
+            __atomic_add_fetch(&failure_count, 1, __ATOMIC_RELAXED);
+            pthread_mutex_unlock(&output_mutex);
+        } else if (truncated) {
+            pthread_mutex_lock(&output_mutex);
+            fprintf(fout_failure, "[TRUNCATED_ADDR] %s", data.line);
+            __atomic_add_fetch(&failure_count, 1, __ATOMIC_RELAXED);
+            pthread_mutex_unlock(&output_mutex);
+        } else {
+            unsigned char extracted_bytes[128];
+            size_t extracted_len = 0;
+            if (decode_address_general(address_part_buffer, extracted_bytes, sizeof(extracted_bytes), &extracted_len)) {
+                if (extracted_len == 20) {
+                    char hex_str[41];
+                    bytes_to_hex(extracted_bytes, 20, hex_str);
+                    char *result_str = strdup(hex_str);
+                    if (result_str) {
+                        pthread_mutex_lock(&results_mutex);
+
+                        if (success_count_atomic >= success_capacity) {
+                            size_t new_capacity = success_capacity == 0 ? 1000000 : success_capacity * 2;
+                            char **new_results = realloc(success_results, new_capacity * sizeof(char*));
+                            if (new_results) {
+                                success_results = new_results;
+                                success_capacity = new_capacity;
+                            } else {
+                                free(result_str);
+                                pthread_mutex_unlock(&results_mutex);
+                                continue;
+                            }
+                        }
+                        
+                        success_results[success_count_atomic] = result_str;
+                        success_count_atomic++;
+
+                        pthread_mutex_unlock(&results_mutex);
+                    }
+                } else {
+                    char hex_str[257];
+                    bytes_to_hex(extracted_bytes, extracted_len, hex_str);
+                    pthread_mutex_lock(&output_mutex);
+                    fprintf(fout_failure, "[NON_STANDARD_HASH: %s] %s", hex_str, data.line);
+                    __atomic_add_fetch(&failure_count, 1, __ATOMIC_RELAXED);
+                    pthread_mutex_unlock(&output_mutex);
+                }
+            } else {
+                pthread_mutex_lock(&output_mutex);
+                fprintf(fout_failure, "[DECODE_FAILED: %s] %s", address_part_buffer, data.line);
+                __atomic_add_fetch(&failure_count, 1, __ATOMIC_RELAXED);
+                pthread_mutex_unlock(&output_mutex);
+            }
+        }
+        free(data.line);
+        __atomic_add_fetch(&processed_bytes, data.length, __ATOMIC_RELAXED);
     }
     return NULL;
 }
 
-// 比較函數，用於 qsort 排序十六進制字符串 
-int compare_hex_strings(const void *a, const void *b) {
-    const ProcessedResult *res_a = (const ProcessedResult *)a;
-    const ProcessedResult *res_b = (const ProcessedResult *)b;
-    return strcmp(res_a->output_hex_str, res_b->output_hex_str);
-}
+/* =========================================================================
+ * 5. MAIN FUNCTION (Entry Point)
+ * ========================================================================= */
 
 int main(int argc, char *argv[]) {
-
     char *input_source = NULL;
     char *output_base_name = "output";
-    bool use_default_output_name = true;
-
     int thread_count = 4;
-#ifdef _WIN32
-    SYSTEM_INFO sysinfo;
-    GetSystemInfo(&sysinfo);
-    thread_count = sysinfo.dwNumberOfProcessors;
-#else
-    long num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
-    if (num_cpus > 0) {
-        thread_count = (int)num_cpus;
-    }
-#endif
-    if (thread_count == 0) thread_count = 1;
 
     if (argc == 2) {
         input_source = argv[1];
     } else if (argc == 4 && strcmp(argv[1], "-o") == 0) {
         output_base_name = argv[2];
         input_source = argv[3];
-        use_default_output_name = false;
     } else {
         fprintf(stderr, "Usage  : %s <file or address>\n", argv[0]);
         fprintf(stderr, "  Or   : %s -o <Output document prefix> <file or address>\n", argv[0]);
@@ -245,239 +406,159 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "         ./decode Input_file_containing_addresses.txt\n");
         fprintf(stderr, "         ./decode 19qZAgZM4dniNqwuYmQca7FBReTLGX9xyS\n");
         fprintf(stderr, "         ./decode -o <Output_document_prefix> <Input_file_containing_addresses.txt>\n");
-        fprintf(stderr, "         ./decode -o <Output_document_prefix> <19qZAgZM4dniNqwuYmQca7FBReTLGX9xyS>\n");
+        fprintf(stderr, "         ./decode -o <Output_document_prefix> <19qZAgZM4dniNqwuYmQca7FBReTLGX9xyS>\n\n");
         fprintf(stderr, " Tip   : <file or address> is \"-\" means reading from standard input.\n");
+		fprintf(stderr, " Tip   : Technical Support: github.com/8891689\n");
         return 1;
     }
-
-    char outFileSuccessPath[256];
-    char outFileFailurePath[256];
-
-    char **lines = NULL;
-    size_t count = 0;
-    bool is_file_input = false;
 
     FILE *fin = NULL;
     if (strcmp(input_source, "-") == 0) {
         fin = stdin;
-        is_file_input = true;
     } else {
         fin = fopen(input_source, "r");
-        if (fin) {
-            is_file_input = true;
+    }
+
+    if (!fin) {
+        // Single address mode
+        unsigned char bytes[128];
+        size_t len = 0;
+        if (decode_address_general(input_source, bytes, sizeof(bytes), &len)) {
+            if (len == 20) {
+                char hex_str[41];
+                bytes_to_hex(bytes, 20, hex_str);
+                fprintf(stdout, "%s\n", hex_str);
+            } else {
+                char hex_str[257];
+                bytes_to_hex(bytes, len, hex_str);
+                fprintf(stderr, "[Error] Decoded, but not a standard 20-byte hash: %s\n", hex_str);
+            }
         } else {
-            is_file_input = false;
-            if (errno != ENOENT) {
-                perror("無法打開輸入文件");
-                return 1;
-            }
+            fprintf(stderr, "[Error] Failed to decode address.\n");
         }
-    }
-    
-    bool is_single_address_console_output_mode = !is_file_input && use_default_output_name;
-
-    if (is_file_input) {
-        size_t capacity = 1024;
-        lines = (char**)malloc(capacity * sizeof(char*));
-        if(!lines){
-           if (fin != stdin) fclose(fin);
-           perror("內存分配失敗");
-           return 1;
-        }
-
-        char buffer[1024];
-        while(fgets(buffer, sizeof(buffer), fin)){
-           if(count >= capacity){
-             capacity *=2;
-             char** temp = (char**)realloc(lines, capacity * sizeof(char*));
-              if(!temp){
-                 for(size_t i = 0; i < count; i++) free(lines[i]);
-                 free(lines);
-                 if (fin != stdin) fclose(fin);
-                 perror("內存分配失敗");
-                 return 1;
-              }
-              lines = temp;
-            }
-            lines[count] = strdup(buffer);
-             if(!lines[count]){
-                for(size_t i = 0; i < count; i++) free(lines[i]);
-                 free(lines);
-                 if (fin != stdin) fclose(fin);
-                 perror("內存分配失敗");
-                 return 1;
-             }
-            count++;
-        }
-        if (fin != stdin) fclose(fin);
-         if(count == 0){
-            fprintf(stderr, "輸入文件/標準輸入為空或無有效行。\n");
-            free(lines);
-            return 1;
-         }
-    } else {
-        lines = (char**)malloc(sizeof(char *));
-        if (!lines) {
-            perror("內存分配失敗");
-            return 1;
-        }
-        lines[0] = strdup(input_source);
-        if (!lines[0]) {
-            free(lines);
-            perror("內存分配失敗");
-            return 1;
-        }
-        count = 1;
+        return 0;
     }
 
-    ProcessedResult *all_results = (ProcessedResult*)calloc(count, sizeof(ProcessedResult));
-    if (!all_results) {
-        fprintf(stderr, "內存分配失敗。\n");
-        for (size_t i = 0; i < count; i++) free(lines[i]);
-        free(lines);
+    if (fin != stdin) {
+        FSEEK(fin, 0, SEEK_END);
+        total_bytes = FTELL(fin);
+        FSEEK(fin, 0, SEEK_SET);
+    }
+
+    char outFileSuccessPath[256], outFileFailurePath[256];
+    snprintf(outFileSuccessPath, sizeof(outFileSuccessPath), "%s_success_unique_sorted.txt", output_base_name);
+    snprintf(outFileFailurePath, sizeof(outFileFailurePath), "%s_failure.txt", output_base_name);
+    fout_failure = fopen(outFileFailurePath, "w");
+    if (!fout_failure) {
+        perror("Failed to open failure output file");
+        fclose(fin);
         return 1;
     }
 
-    pthread_t *threads = (pthread_t*)malloc(thread_count * sizeof(pthread_t));
-    ThreadData *thread_data = (ThreadData*)malloc(thread_count * sizeof(ThreadData));
+    pthread_mutex_init(&buffer_mutex, NULL);
+    pthread_mutex_init(&output_mutex, NULL);
+    pthread_mutex_init(&results_mutex, NULL);
+    pthread_cond_init(&buffer_not_full, NULL);
+    pthread_cond_init(&buffer_not_empty, NULL);
 
-    if(!threads || !thread_data){
-      fprintf(stderr,"內存分配失敗。\n");
-      for(size_t i = 0; i < count; i++) free(lines[i]);
-      free(lines);
-      free(all_results);
-      free(threads);
-      free(thread_data);
-      return 1;
+    pthread_t *threads = malloc(thread_count * sizeof(pthread_t));
+    for (int i = 0; i < thread_count; i++) {
+        pthread_create(&threads[i], NULL, thread_process, NULL);
     }
 
-    size_t lines_per_thread = count / thread_count;
-    size_t remaining = count % thread_count;
-
-    for(int i = 0; i < thread_count; i++){
-       thread_data[i].lines = lines;
-       thread_data[i].start = i * lines_per_thread;
-       thread_data[i].end = (i+1) * lines_per_thread;
-       if(i == thread_count - 1){
-         thread_data[i].end += remaining;
-       }
-       thread_data[i].results = all_results;
-
-      if(pthread_create(&threads[i],NULL,thread_process,&thread_data[i])!=0){
-          fprintf(stderr,"無法創建線程%d。\n",i);
-          for(int j = 0; j < i; j++) pthread_join(threads[j],NULL);
-          for(size_t k = 0; k < count; k++) {
-              free(lines[k]);
-          }
-          free(lines); free(all_results); free(threads); free(thread_data);
-          return 1;
-       }
+    TimerData timer;
+    start_timer(&timer);
+    pthread_t progress_thread_id;
+    ProgressData p_data = { .timer = &timer };
+    if (fin != stdin) {
+        pthread_create(&progress_thread_id, NULL, display_progress, &p_data);
     }
 
-    for(int i = 0; i < thread_count;i++){
-      pthread_join(threads[i],NULL);
+    // Producer loop
+    char *line = NULL;
+    size_t len = 0;
+    ssize_t read;
+    while ((read = getline(&line, &len, fin)) != -1) {
+        pthread_mutex_lock(&buffer_mutex);
+        while (count_in_buffer == BUFFER_SIZE) {
+            pthread_cond_wait(&buffer_not_full, &buffer_mutex);
+        }
+        
+        line_buffer[write_idx].line = line;
+        line_buffer[write_idx].length = read;
+        
+        line = NULL; 
+        len = 0;
+        
+        write_idx = (write_idx + 1) % BUFFER_SIZE;
+        count_in_buffer++;
+        pthread_cond_signal(&buffer_not_empty);
+        pthread_mutex_unlock(&buffer_mutex);
     }
-
-    size_t standard_hash_count = 0;
-    size_t non_standard_or_failed_count = 0;
     
-    ProcessedResult *standard_hashes_collection = NULL;
-
-    for (size_t i = 0; i < count; ++i) {
-        if (all_results[i].status == SUCCESS_STANDARD_HASH) {
-            standard_hash_count++;
-        } else {
-            non_standard_or_failed_count++;
-        }
+    if (line) {
+        free(line);
     }
 
-    if (standard_hash_count > 0) {
-        standard_hashes_collection = (ProcessedResult*)malloc(standard_hash_count * sizeof(ProcessedResult));
-        if (!standard_hashes_collection) {
-            fprintf(stderr, "內存分配失敗 (結果收集)。\n");
-            goto cleanup;
-        }
-        size_t current_collection_idx = 0;
-        for(size_t i = 0; i < count; ++i) {
-            if (all_results[i].status == SUCCESS_STANDARD_HASH) {
+    pthread_mutex_lock(&buffer_mutex);
+    producer_finished = true;
+    pthread_cond_broadcast(&buffer_not_empty);
+    pthread_mutex_unlock(&buffer_mutex);
 
-                standard_hashes_collection[current_collection_idx] = all_results[i];
-                current_collection_idx++;
-            }
-        }
+    for (int i = 0; i < thread_count; i++) {
+        pthread_join(threads[i], NULL);
     }
 
-    if (standard_hash_count > 1) {
-        qsort(standard_hashes_collection, standard_hash_count, sizeof(ProcessedResult), compare_hex_strings);
+    if (fin != stdin) {
+        display_thread_done = true;
+        pthread_join(progress_thread_id, NULL);
     }
 
-    if (is_single_address_console_output_mode) {
-        if (standard_hash_count > 0) {
-            fprintf(stdout, "%s\n", standard_hashes_collection[0].output_hex_str);
-        }
+    fprintf(stderr, "Processing complete. Now sorting and filtering unique results...\n");
+    size_t final_success_count = success_count_atomic;
+    
+    if (final_success_count > 0) {
+        qsort(success_results, final_success_count, sizeof(char*), compare_strings);
+    }
+    
+    FILE *fout_success = fopen(outFileSuccessPath, "w");
+    if (!fout_success) {
+        perror("Failed to open success output file");
     } else {
-        snprintf(outFileSuccessPath, sizeof(outFileSuccessPath), "%s_success.txt", output_base_name);
-        snprintf(outFileFailurePath, sizeof(outFileFailurePath), "%s_failure.txt", output_base_name);
-
-        FILE *fout_success = fopen(outFileSuccessPath, "w");
-        FILE *fout_failure = fopen(outFileFailurePath, "w");
-
-        if (!fout_success) {
-            perror("無法打開成功輸出文件");
-            if (fout_failure) fclose(fout_failure);
-            goto cleanup;
-        }
-        if (!fout_failure) {
-            perror("無法打開失敗輸出文件");
-            if (fout_success) fclose(fout_success);
-            goto cleanup;
-        }
-
-        if (standard_hash_count > 0) {
-            fprintf(fout_success, "%s\n", standard_hashes_collection[0].output_hex_str);
-            for (size_t i = 1; i < standard_hash_count; ++i) {
-                if (strcmp(standard_hashes_collection[i].output_hex_str, standard_hashes_collection[i-1].output_hex_str) != 0) {
-                    fprintf(fout_success, "%s\n", standard_hashes_collection[i].output_hex_str);
+        size_t unique_count = 0;
+        if (final_success_count > 0) {
+            fprintf(fout_success, "%s\n", success_results[0]);
+            unique_count++;
+            for (size_t i = 1; i < final_success_count; i++) {
+                if (strcmp(success_results[i], success_results[i - 1]) != 0) {
+                    fprintf(fout_success, "%s\n", success_results[i]);
+                    unique_count++;
                 }
             }
         }
-
-        for (size_t i = 0; i < count; i++) {
-
-            size_t original_index = all_results[i].original_line_index;
-            char* original_line = lines[original_index];
-
-            if (all_results[i].status == DECODE_FAILED) {
-                fprintf(fout_failure, "[DECODE_FAILED] %s", original_line);
-            } else if (all_results[i].status == SUCCESS_NON_STANDARD_HASH) {
-                fprintf(fout_failure, "[NON_STANDARD_HASH: %s] %s", all_results[i].output_hex_str, original_line);
-            }
-
-            if (all_results[i].status != SUCCESS_STANDARD_HASH &&
-                strlen(original_line) > 0 &&
-                original_line[strlen(original_line)-1] != '\n') {
-                fprintf(fout_failure, "\n");
-            }
-        }
-
         fclose(fout_success);
-        fclose(fout_failure);
-
-        printf("Total  quantity: %zu\n", count);
-        printf("Hash160 Success: %zu (Deduplicated and sorted)\n", standard_hash_count);
-        printf("Hash160  failed: %zu\n", non_standard_or_failed_count);
+        fprintf(stderr, "Successfully decoded (unique): %llu\n", (unsigned long long)unique_count);
     }
 
-cleanup:
-    for (size_t i = 0; i < count; i++) {
-        free(lines[i]);
-
+    for (size_t i = 0; i < final_success_count; i++) {
+        free(success_results[i]);
     }
-    free(lines);
-    free(all_results);
-    free(standard_hashes_collection);
+    free(success_results);
+    
+    fclose(fout_failure);
+    if (fin != stdin) fclose(fin);
     free(threads);
-    free(thread_data);
+    
+    pthread_mutex_destroy(&buffer_mutex);
+    pthread_mutex_destroy(&output_mutex);
+    pthread_mutex_destroy(&results_mutex);
+    pthread_cond_destroy(&buffer_not_full);
+    pthread_cond_destroy(&buffer_not_empty);
+
+    fprintf(stderr, "Total lines processed: %llu\n", (unsigned long long)(final_success_count + failure_count));
+    fprintf(stderr, "Successfully decoded (total): %llu\n", (unsigned long long)final_success_count);
+    fprintf(stderr, "Failed or non-standard: %llu\n", (unsigned long long)failure_count);
+    fprintf(stderr, "Results saved to %s and %s\n", outFileSuccessPath, outFileFailurePath);
 
     return 0;
 }
