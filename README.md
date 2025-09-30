@@ -27,7 +27,7 @@ make
 
 ### Or, navigate to the project directory in the terminal and run:
 ```bash
-gcc -O3 -lpthread -Wall -Wextra -march=native -static base58.c bech32.c cashaddr.c main.c sha256.c -o decode
+gcc -static -lpthread -m64 -march=native -mtune=native -Wall -Wextra -Ofast -ftree-vectorize -funroll-all-loops -flto base58.c bech32.c cashaddr.c main.c sha256.c -o decode
 
 ```
 - `-o universal_decode`: Specifies the output executable file name as `decode`.
@@ -213,7 +213,7 @@ This project uses the MIT license. See the [LICENSE](LICENSE) file for details.
 
 # Contributions Assist in creation Thanks
 
-ChatGPT, Gemini, deepseek.
+Gemini, deepseek.
 
 # Sponsorship
 If this project is helpful to you, please consider sponsoring. This is the greatest support I can give, and I am deeply grateful. Thank you.
