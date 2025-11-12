@@ -1,4 +1,46 @@
 # Project Overview
+
+<!--  -->
+<p align="center">
+  <img src="https://img.shields.io/badge/Utility-Address%20to%20Hash160-blue" alt="Address to Hash160">
+  <img src="https://img.shields.io/badge/Performance-Multithreaded-brightgreen" alt="Multithreaded Performance">
+  <img src="https://img.shields.io/badge/Interface-CLI%20Tool-lightgrey" alt="Command Line Interface Tool">
+</p>
+
+<!--  (Supported Address Formats) -->
+<p align="center">
+  <img src="https://img.shields.io/badge/Format-Base58-orange" alt="Base58">
+  <img src="https://img.shields.io/badge/Format-Bech32%20(SegWit)-blue" alt="Bech32 (SegWit)">
+  <img src="https://img.shields.io/badge/Format-CashAddr-green" alt="CashAddr">
+  <img src="https://img.shields.io/badge/Format-Legacy%20&%20P2SH-yellow" alt="Legacy & P2SH">
+</p>
+
+<!-- 🪙  (Supported Cryptocurrencies) -->
+<p align="center">
+  <img src="https://img.shields.io/badge/Bitcoin-BTC-orange?logo=bitcoin" alt="Bitcoin">
+  <img src="https://img.shields.io/badge/Bitcoin%20Cash-BCH-green?logo=bitcoincash" alt="Bitcoin Cash">
+  <img src="https://img.shields.io/badge/Litecoin-LTC-blue?logo=litecoin" alt="Litecoin">
+  <img src="https://img.shields.io/badge/Bitcoin%20Gold-BTG-yellow" alt="Bitcoin Gold">
+  <img src="https://img.shields.io/badge/Dash-DASH-blue?logo=dash" alt="Dash">
+  <img src="https://img.shields.io/badge/Ethereum-ETH-blue?logo=ethereum" alt="Ethereum">
+</p>
+
+<!--  -->
+<p align="center">
+  <img src="https://img.shields.io/badge/Language-C-blue?logo=c" alt="Language C">
+  <img src="https://img.shields.io/badge/Dependencies-None-green" alt="No Dependencies">
+  <img src="https://img.shields.io/badge/Platform-Linux%20&%20Windows-lightgrey?logo=linux&logoColor=black" alt="Linux & Windows">
+  <a href="https://github.com/8891689/Address_Decode/releases"><img src="https://img.shields.io/github/v/release/8891689/Address_Decode" alt="Latest Release"></a>
+</p>
+
+<!--  -->
+<p align="center">
+  <a href="https://github.com/8891689/Address_Decode/blob/main/LICENSE"><img src="https://img.shields.io/github/license/8891689/Address_Decode" alt="License"></a>
+  <a href="https://github.com/8891689/Address_Decode/commits/main"><img src="https://img.shields.io/github/last-commit/8891689/Address_Decode" alt="Last Commit"></a>
+  <a href="https://github.com/8891689/Address_Decode/stargazers"><img src="https://img.shields.io/github/stars/8891689/Address_Decode?style=social" alt="GitHub Stars"></a>
+</p>
+
+
 **Address_Decode**
 
 Address Decode is an efficient multithreaded command-line tool designed to decode various cryptocurrency addresses (such as Bitcoin BTC, Bitcoin Cash BCH, Litecoin LTC, Bitcoin Gold BTG, etc.) and extract their underlying `hash160` values. `hash160` is a commonly used cryptographic hash employed in generating the core part of cryptocurrency addresses.
