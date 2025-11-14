@@ -256,7 +256,8 @@ None. You can compile as long as you download the compiler.
 This project uses the MIT license. See the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgements
-Special thanks to Gemini and DeepSeek for their assistance in content creation and translation.
+
+Special thanks to Gemini and DeepSeek for their assistance with testing and translation.
 
 # Sponsorship
 
