@@ -1,5 +1,3 @@
-# Project Overview
-
 <!--  -->
 <p align="center">
   <img src="https://img.shields.io/badge/Utility-Address%20to%20Hash160-blue" alt="Address to Hash160">
@@ -23,6 +21,7 @@
   <img src="https://img.shields.io/badge/Bitcoin%20Gold-BTG-yellow" alt="Bitcoin Gold">
   <img src="https://img.shields.io/badge/Dash-DASH-blue?logo=dash" alt="Dash">
   <img src="https://img.shields.io/badge/Ethereum-ETH-blue?logo=ethereum" alt="Ethereum">
+  <img src="https://img.shields.io/badge/Dogecoin-DOGE-yellow?logo=dogecoin" alt="Dogecoin">
 </p>
 
 <!--  -->
@@ -41,9 +40,12 @@
 </p>
 
 
+
+# Project Overview
+
 **Address_Decode**
 
-Address Decode is an efficient multithreaded command-line tool designed to decode various cryptocurrency addresses (such as Bitcoin BTC, Bitcoin Cash BCH, Litecoin LTC, Bitcoin Gold BTG, etc.) and extract their underlying `hash160` values. `hash160` is a commonly used cryptographic hash employed in generating the core part of cryptocurrency addresses.
+Address Decode is an efficient multithreaded command-line tool designed to decode various cryptocurrency addresses (such as Bitcoin BTC, Bitcoin Cash BCH, Litecoin LTC, Bitcoin Gold BTG, dogecoin DOGE,etc.) and extract their underlying `hash160` values. `hash160` is a commonly used cryptographic hash employed in generating the core part of cryptocurrency addresses.
 
 # Features
 - **Support for Multiple Address Formats**: Supports various mainstream cryptocurrency address formats including Base58, CashAddr (Bech32), SegWit, and more.
