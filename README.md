@@ -255,11 +255,11 @@ None. You can compile as long as you download the compiler.
 # License
 This project uses the MIT license. See the [LICENSE](LICENSE) file for details.
 
-# Contributions Assist in creation Thanks
-
-Gemini, deepseek.
+## Acknowledgements
+Special thanks to Gemini and DeepSeek for their assistance in content creation and translation.
 
 # Sponsorship
+
 If this project is helpful to you, please consider sponsoring. This is the greatest support I can give, and I am deeply grateful. Thank you.
 
 - **BTC**: bc1qt3nh2e6gjsfkfacnkglt5uqghzvlrr6jahyj2k
