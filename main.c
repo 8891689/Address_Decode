@@ -19,7 +19,7 @@ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
 AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE. *https://github.com/8891689 
+SOFTWARE. *https://www.8891689.com/ 
  */
 
 // Description: A multi-threaded tool to decode various cryptocurrency addresses from a large file.
@@ -391,24 +391,53 @@ void* thread_process(void *arg) {
 
 int main(int argc, char *argv[]) {
     char *input_source = NULL;
-    char *output_base_name = "output";
-    int thread_count = 4;
+    char *output_filename = "output.txt"; // Default filename
+    int thread_count = 4; // Default threads
 
-    if (argc == 2) {
-        input_source = argv[1];
-    } else if (argc == 4 && strcmp(argv[1], "-o") == 0) {
-        output_base_name = argv[2];
-        input_source = argv[3];
-    } else {
-        fprintf(stderr, "Usage  : %s <file or address>\n", argv[0]);
-        fprintf(stderr, "  Or   : %s -o <Output document prefix> <file or address>\n", argv[0]);
-        fprintf(stderr, "Example: \n");
-        fprintf(stderr, "         ./decode Input_file_containing_addresses.txt\n");
-        fprintf(stderr, "         ./decode 19qZAgZM4dniNqwuYmQca7FBReTLGX9xyS\n");
-        fprintf(stderr, "         ./decode -o <Output_document_prefix> <Input_file_containing_addresses.txt>\n");
-        fprintf(stderr, "         ./decode -o <Output_document_prefix> <19qZAgZM4dniNqwuYmQca7FBReTLGX9xyS>\n\n");
-        fprintf(stderr, " Tip   : <file or address> is \"-\" means reading from standard input.\n");
-		fprintf(stderr, " Tip   : Technical Support: github.com/8891689\n");
+    // 參數解析循環
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-o") == 0) {
+            if (i + 1 < argc) {
+                output_filename = argv[++i];
+            } else {
+                fprintf(stderr, "Error: -o argument missing\n");
+                return 1;
+            }
+        } 
+        else if (strcmp(argv[i], "-t") == 0) {
+            if (i + 1 < argc) {
+                thread_count = atoi(argv[++i]);
+                if (thread_count < 1) thread_count = 1;
+            } else {
+                fprintf(stderr, "Error: -t argument missing\n");
+                return 1;
+            }
+        }
+        else {
+            input_source = argv[i];
+        }
+    }
+
+    if (input_source == NULL) {
+        fprintf(stderr, "Usage  : %s [options] <file or address>\n\n", argv[0]);
+        
+        fprintf(stderr, "Options:\n");
+        fprintf(stderr, "  -o <filename>  Specify the output filename for successfully decoded results.\n");
+        fprintf(stderr, "                 Failures will be saved to '<filename>_failure.txt'.\n");
+        fprintf(stderr, "                 (Default: output.txt)\n\n");
+        
+        fprintf(stderr, "  -t <number>    Set the number of threads for parallel processing.\n");
+        fprintf(stderr, "                 (Default: 4)\n\n");
+        
+        fprintf(stderr, "Examples:\n");
+        fprintf(stderr, "  %s input_addresses.txt\n", argv[0]);
+        fprintf(stderr, "  %s -t 8 input_addresses.txt\n", argv[0]);
+        fprintf(stderr, "  %s -o my_result.txt -t 16 input_addresses.txt\n", argv[0]);
+        fprintf(stderr, "  %s 19qZAgZM4dniNqwuYmQca7FBReTLGX9xyS\n\n", argv[0]);
+        
+        fprintf(stderr, "Tips:\n");
+        fprintf(stderr, "  <file or address> can be \"-\" to read from standard input.\n");
+        fprintf(stderr, "  Technical Support: www.8891689.com\n");
         return 1;
     }
 
@@ -445,9 +474,10 @@ int main(int argc, char *argv[]) {
         FSEEK(fin, 0, SEEK_SET);
     }
 
-    char outFileSuccessPath[256], outFileFailurePath[256];
-    snprintf(outFileSuccessPath, sizeof(outFileSuccessPath), "%s_success_unique_sorted.txt", output_base_name);
-    snprintf(outFileFailurePath, sizeof(outFileFailurePath), "%s_failure.txt", output_base_name);
+    // Build failure filename: output_filename + "_failure.txt"
+    char outFileFailurePath[1024];
+    snprintf(outFileFailurePath, sizeof(outFileFailurePath), "%s_failure.txt", output_filename);
+    
     fout_failure = fopen(outFileFailurePath, "w");
     if (!fout_failure) {
         perror("Failed to open failure output file");
@@ -521,7 +551,7 @@ int main(int argc, char *argv[]) {
         qsort(success_results, final_success_count, sizeof(char*), compare_strings);
     }
     
-    FILE *fout_success = fopen(outFileSuccessPath, "w");
+    FILE *fout_success = fopen(output_filename, "w");
     if (!fout_success) {
         perror("Failed to open success output file");
     } else {
@@ -558,7 +588,7 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "Total lines processed: %llu\n", (unsigned long long)(final_success_count + failure_count));
     fprintf(stderr, "Successfully decoded (total): %llu\n", (unsigned long long)final_success_count);
     fprintf(stderr, "Failed or non-standard: %llu\n", (unsigned long long)failure_count);
-    fprintf(stderr, "Results saved to %s and %s\n", outFileSuccessPath, outFileFailurePath);
+    fprintf(stderr, "Results saved to %s and %s\n", output_filename, outFileFailurePath);
 
     return 0;
 }
